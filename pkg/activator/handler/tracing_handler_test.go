@@ -18,18 +18,21 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/logging"
 	rtesting "knative.dev/pkg/reconciler/testing"
-	"knative.dev/pkg/tracing"
 	"knative.dev/pkg/tracing/config"
-	tracetesting "knative.dev/pkg/tracing/testing"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestTracingHandler(t *testing.T) {
@@ -53,12 +56,14 @@ func TestTracingHandler(t *testing.T) {
 
 			resp := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "http://example.com", nil)
-			const traceID = "821e0d50d931235a5ba3fa42eddddd8f"
-			req.Header["X-B3-Traceid"] = []string{traceID}
-			req.Header["X-B3-Spanid"] = []string{"b3bd5e1c4318c78a"}
+			const (
+				traceID = "821e0d50d931235a5ba3fa42eddddd8f"
+				spanID  = "b3bd5e1c4318c78a"
+			)
+			req.Header.Set("traceparent", traceparentHeader(traceID, spanID))
 
 			cm := tracingConfig(test.tracingEnabled)
-			cfg, err := config.NewTracingConfigFromConfigMap(cm)
+			_, err := config.NewTracingConfigFromConfigMap(cm)
 			if err != nil {
 				t.Fatal("Failed to parse tracing config", err)
 			}
@@ -67,26 +72,25 @@ func TestTracingHandler(t *testing.T) {
 			configStore.OnConfigChanged(cm)
 			ctx = configStore.ToContext(ctx)
 
-			reporter, co := tracetesting.FakeZipkinExporter()
-			oct := tracing.NewOpenCensusTracer(co)
+			// Set up in-memory exporter for OpenTelemetry spans.
+			exporter := newInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)),
+			)
+			otel.SetTracerProvider(tp)
 			t.Cleanup(func() {
-				reporter.Close()
-				oct.Shutdown(context.Background())
+				_ = tp.Shutdown(context.Background())
 			})
-
-			if err := oct.ApplyConfig(cfg); err != nil {
-				t.Error("Failed to apply tracer config:", err)
-			}
 
 			handler.ServeHTTP(resp, req.WithContext(ctx))
 
-			spans := reporter.Flush()
+			spans := exporter.Flush()
 
 			if test.tracingEnabled {
 				if len(spans) != 1 {
 					t.Errorf("Got %d spans, expected 1: spans = %v", len(spans), spans)
 				}
-				if got := spans[0].TraceID.String(); got != traceID {
+				if got := spans[0].SpanContext().TraceID().String(); got != traceID {
 					t.Errorf("spans[0].TraceID = %s, want %s", got, traceID)
 				}
 			} else if len(spans) != 0 {
@@ -111,4 +115,37 @@ func tracingConfig(enabled bool) *corev1.ConfigMap {
 		cm.Data["debug"] = "true"
 	}
 	return cm
+}
+
+// ----------------------- helpers -----------------------
+
+// inMemoryExporter is a simple SpanExporter that stores spans in memory for inspection.
+type inMemoryExporter struct {
+	mu    sync.Mutex
+	spans []sdktrace.ReadOnlySpan
+}
+
+func newInMemoryExporter() *inMemoryExporter { return &inMemoryExporter{} }
+
+func (e *inMemoryExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.spans = append(e.spans, spans...)
+	return nil
+}
+
+func (e *inMemoryExporter) Shutdown(_ context.Context) error { return nil }
+
+func (e *inMemoryExporter) Flush() []sdktrace.ReadOnlySpan {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]sdktrace.ReadOnlySpan, len(e.spans))
+	copy(out, e.spans)
+	return out
+}
+
+// traceparentHeader returns a formatted W3C traceparent header value for the
+// given trace and span IDs.
+func traceparentHeader(traceID, spanID string) string {
+	return fmt.Sprintf("00-%s-%s-01", traceID, spanID)
 }

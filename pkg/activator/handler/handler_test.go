@@ -30,14 +30,11 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
 	netheader "knative.dev/networking/pkg/http/header"
 	pkgnet "knative.dev/pkg/network"
 	"knative.dev/pkg/ptr"
 	rtesting "knative.dev/pkg/reconciler/testing"
-	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
-	tracetesting "knative.dev/pkg/tracing/testing"
 	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 	activatortest "knative.dev/serving/pkg/activator/testing"
@@ -49,6 +46,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"knative.dev/pkg/logging"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -228,14 +228,14 @@ func TestActivationHandlerTraceSpans(t *testing.T) {
 		traceBackend tracingconfig.BackendType
 	}{{
 		name:         "zipkin trace enabled",
-		wantSpans:    3,
+		wantSpans:    1,
 		traceBackend: tracingconfig.Zipkin,
 	}, {
 		name:         "trace disabled",
 		traceBackend: tracingconfig.None,
 	}}
 
-	spanNames := []string{"throttler_try", "/", "activator_proxy"}
+	spanNames := []string{"ActivatorRequest"}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup transport
@@ -247,51 +247,35 @@ func TestActivationHandlerTraceSpans(t *testing.T) {
 			}
 			rt := pkgnet.RoundTripperFunc(fakeRT.RT)
 
-			// Create tracer with reporter recorder
-			reporter, co := tracetesting.FakeZipkinExporter()
-			oct := tracing.NewOpenCensusTracer(co)
-
-			cm := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: tracingconfig.ConfigName,
-				},
-				Data: map[string]string{
-					"zipkin-endpoint": "localhost:1234",
-					"backend":         string(tc.traceBackend),
-					"debug":           "true",
-				},
-			}
-			cfg, err := tracingconfig.NewTracingConfigFromConfigMap(cm)
-			if err != nil {
-				t.Fatal("Failed to generate config:", err)
-			}
-			if err := oct.ApplyConfig(cfg); err != nil {
-				t.Error("Failed to apply tracer config:", err)
-			}
+			// Create in-memory OpenTelemetry exporter
+			exporter := newInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)),
+			)
+			otel.SetTracerProvider(tp)
 
 			ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 			defer func() {
 				cancel()
-				reporter.Close()
-				oct.Shutdown(context.Background())
+				_ = tp.Shutdown(context.Background())
 			}()
 
 			handler := New(ctx, fakeThrottler{}, rt, false /*usePassthroughLb*/, logging.FromContext(ctx), false /* TLS */)
 
 			// Set up config store to populate context.
 			configStore := setupConfigStore(t, logging.FromContext(ctx))
-			// Update the store with our "new" config explicitly.
-			configStore.OnConfigChanged(cm)
+			// Update the store with tracing configuration based on test case.
+			configStore.OnConfigChanged(tracingConfig(tc.traceBackend == tracingconfig.Zipkin))
 			sendRequest(testNamespace, testRevName, handler, configStore)
 
-			gotSpans := reporter.Flush()
+			gotSpans := exporter.Flush()
 			if len(gotSpans) != tc.wantSpans {
 				t.Errorf("NumSpans = %d, want: %d", len(gotSpans), tc.wantSpans)
 			}
 
 			for i, spanName := range spanNames[0:tc.wantSpans] {
-				if gotSpans[i].Name != spanName {
-					t.Errorf("Span[%d] = %q, expected %q", i, gotSpans[i].Name, spanName)
+				if gotSpans[i].Name() != spanName {
+					t.Errorf("Span[%d] = %q, expected %q", i, gotSpans[i].Name(), spanName)
 				}
 			}
 		})
