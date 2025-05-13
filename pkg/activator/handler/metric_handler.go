@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"time"
 
-	pkgmetrics "knative.dev/pkg/metrics"
 	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/apis/serving"
 	pkghttp "knative.dev/serving/pkg/http"
@@ -53,12 +52,11 @@ func (h *MetricHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err := recover()
 		latency := time.Since(start)
 		if err != nil {
-			reporterCtx := metrics.AugmentWithResponse(reporterCtx, http.StatusInternalServerError)
-			pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
+			// In case of panic, record metrics with status code 500 and then panic again
+			RecordRequestMetrics(reporterCtx, http.StatusInternalServerError, float64(latency.Milliseconds()))
 			panic(err)
 		}
-		reporterCtx := metrics.AugmentWithResponse(reporterCtx, rr.ResponseCode)
-		pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
+		RecordRequestMetrics(reporterCtx, rr.ResponseCode, float64(latency.Milliseconds()))
 	}()
 
 	h.nextHandler.ServeHTTP(rr, r)

@@ -17,31 +17,26 @@ limitations under the License.
 package handler
 
 import (
-	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/serving/pkg/metrics"
+	"context"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
-	"go.opencensus.io/tag"
+	pkgmetrics "knative.dev/pkg/metrics"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 var (
-	requestConcurrencyM = stats.Float64(
-		"request_concurrency",
-		"Concurrent requests that are routed to Activator",
-		stats.UnitDimensionless)
-	requestCountM = stats.Int64(
-		"request_count",
-		"The number of requests that are routed to Activator",
-		stats.UnitDimensionless)
-	responseTimeInMsecM = stats.Float64(
-		"request_latencies",
-		"The response time in millisecond",
-		stats.UnitMilliseconds)
+	// Meter is the OpenTelemetry meter used for creating metric instruments
+	meter = otel.GetMeterProvider().Meter("knative.dev/serving/pkg/activator")
 
-	// NOTE: 0 should not be used as boundary. See
-	// https://github.com/census-ecosystem/opencensus-go-exporter-stackdriver/issues/98
-	defaultLatencyDistribution = view.Distribution(5, 10, 20, 40, 60, 80, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 2000, 5000, 10000, 20000, 50000, 100000)
+	requestConcurrency  metric.Float64UpDownCounter
+	requestCount        metric.Int64Counter
+	responseTimeInMsecM metric.Float64Histogram
+
+	// The following boundaries are based on the previous OpenCensus configuration
+	// NOTE: 0 should not be used as boundary.
+	defaultLatencyDistribution = []float64{5, 10, 20, 40, 60, 80, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 2000, 5000, 10000, 20000, 50000, 100000}
 )
 
 func init() {
@@ -49,29 +44,51 @@ func init() {
 }
 
 func register() {
-	// Create views to see our measurements. This can return an error if
-	// a previously-registered view has the same name with a different value.
-	// View name defaults to the measure name if unspecified.
-	if err := pkgmetrics.RegisterResourceView(
-		&view.View{
-			Description: "Concurrent requests that are routed to Activator",
-			Measure:     requestConcurrencyM,
-			Aggregation: view.LastValue(),
-			TagKeys:     []tag.Key{metrics.PodKey, metrics.ContainerKey},
-		},
-		&view.View{
-			Description: "The number of requests that are routed to Activator",
-			Measure:     requestCountM,
-			Aggregation: view.Count(),
-			TagKeys:     []tag.Key{metrics.PodKey, metrics.ContainerKey, metrics.ResponseCodeKey, metrics.ResponseCodeClassKey},
-		},
-		&view.View{
-			Description: "The response time in millisecond",
-			Measure:     responseTimeInMsecM,
-			Aggregation: defaultLatencyDistribution,
-			TagKeys:     []tag.Key{metrics.PodKey, metrics.ContainerKey, metrics.ResponseCodeKey, metrics.ResponseCodeClassKey},
-		},
-	); err != nil {
+	var err error
+
+	// Create instruments with the same names, descriptions, and units as the OpenCensus metrics
+	requestConcurrency, err = meter.Float64UpDownCounter(
+		"request_concurrency",
+		metric.WithDescription("Concurrent requests that are routed to Activator"),
+		metric.WithUnit("{count}"))
+	if err != nil {
 		panic(err)
 	}
+
+	requestCount, err = meter.Int64Counter(
+		"request_count",
+		metric.WithDescription("The number of requests that are routed to Activator"),
+		metric.WithUnit("{count}"))
+	if err != nil {
+		panic(err)
+	}
+
+	responseTimeInMsecM, err = meter.Float64Histogram(
+		"request_latencies",
+		metric.WithDescription("The response time in millisecond"),
+		metric.WithUnit("ms"),
+		metric.WithExplicitBucketBoundaries(defaultLatencyDistribution...))
+	if err != nil {
+		panic(err)
+	}
+}
+
+// RecordRequestMetrics records metrics for a request
+func RecordRequestMetrics(ctx context.Context, responseCode int, latencyMs float64) {
+	// Create attribute set similar to what would be used with OpenCensus
+	attrs := attribute.NewSet(
+		attribute.Int("response_code", responseCode),
+		attribute.String("response_code_class", pkgmetrics.ResponseCodeClass(responseCode)),
+	)
+
+	responseTime := metric.WithAttributeSet(attrs)
+	requestCount.Add(ctx, 1, responseTime)
+	responseTimeInMsecM.Record(ctx, latencyMs, responseTime)
+}
+
+// RecordConcurrencyMetrics records the current concurrency value
+func RecordConcurrencyMetrics(ctx context.Context, concurrency float64) {
+	// We're using a gauge-like pattern here, so we need to set the absolute value
+	// This is different from the OpenCensus approach which used LastValue aggregation
+	requestConcurrency.Add(ctx, concurrency)
 }

@@ -29,7 +29,6 @@ import (
 	netstats "knative.dev/networking/pkg/http/stats"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/logging/logkey"
-	pkgmetrics "knative.dev/pkg/metrics"
 	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/apis/serving"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
@@ -212,7 +211,8 @@ func (cr *ConcurrencyReporter) reportToMetricsBackend(key types.NamespacedName, 
 	serviceName := revision.Labels[serving.ServiceLabelKey]
 
 	reporterCtx, _ := metrics.PodRevisionContext(cr.podName, activator.Name, ns, serviceName, configurationName, revName)
-	pkgmetrics.Record(reporterCtx, requestConcurrencyM.M(concurrency))
+	// Use the RecordConcurrencyMetrics function from our OpenTelemetry implementation
+	RecordConcurrencyMetrics(reporterCtx, concurrency)
 }
 
 // Run runs until stopCh is closed and processes events on all incoming channels.
