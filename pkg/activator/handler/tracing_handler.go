@@ -19,7 +19,7 @@ package handler
 import (
 	"net/http"
 
-	"knative.dev/pkg/tracing"
+	otelhttp "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	tracingconfig "knative.dev/pkg/tracing/config"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 )
@@ -27,7 +27,9 @@ import (
 // NewTracingHandler creates a wrapper around tracing.HTTPSpanMiddleware that completely
 // bypasses said handler when tracing is disabled via the Activator's configuration.
 func NewTracingHandler(next http.Handler) http.HandlerFunc {
-	tracingHandler := tracing.HTTPSpanMiddleware(next)
+	// Wrap the next handler with OpenTelemetry instrumentation. The name will appear as the span name.
+	otelHandler := otelhttp.NewHandler(next, "ActivatorRequest")
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		tracingEnabled := activatorconfig.FromContext(r.Context()).Tracing.Backend != tracingconfig.None
 		if !tracingEnabled {
@@ -35,6 +37,6 @@ func NewTracingHandler(next http.Handler) http.HandlerFunc {
 			return
 		}
 
-		tracingHandler.ServeHTTP(w, r)
+		otelHandler.ServeHTTP(w, r)
 	}
 }

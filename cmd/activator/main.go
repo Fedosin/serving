@@ -54,7 +54,6 @@ import (
 	"knative.dev/pkg/profiling"
 	"knative.dev/pkg/signals"
 	"knative.dev/pkg/system"
-	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/pkg/version"
 	"knative.dev/pkg/websocket"
@@ -67,6 +66,7 @@ import (
 	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/networking"
+	"knative.dev/serving/pkg/telemetry"
 )
 
 const (
@@ -179,14 +179,50 @@ func main() {
 	throttler := activatornet.NewThrottler(ctx, env.PodIP)
 	go throttler.Run(ctx, transport, networkConfig.EnableMeshPodAddressability, networkConfig.MeshCompatibilityMode)
 
-	oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(networking.ActivatorServiceName, env.PodIP, logger))
-	defer oct.Shutdown(context.Background())
+	// -------------------- Tracing Setup (OpenTelemetry) --------------------
+	var shutdownTracing func(ctx context.Context) error
 
+	// helper to install or update tracing based on given parameters.
+	install := func(sample float64, collector string) {
+		// Ensure we shutdown previous provider if any.
+		if shutdownTracing != nil {
+			_ = shutdownTracing(context.Background())
+			shutdownTracing = nil
+		}
+
+		// Empty collector or sample <= 0 means disable tracing.
+		if collector == "" || sample <= 0 {
+			return
+		}
+
+		sd, err := telemetry.InstallTracing(ctx, networking.ActivatorServiceName, env.PodName, env.PodIP, sample, collector)
+		if err != nil {
+			logger.Errorw("Unable to initialize OpenTelemetry tracing", zap.Error(err))
+			return
+		}
+		shutdownTracing = sd
+	}
+
+	// Initial installation with defaults/env vars.
+	defaultSample := 0.1
+	defaultCollector := os.Getenv("OTEL_COLLECTOR_ENDPOINT")
+	if defaultCollector == "" {
+		defaultCollector = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	if defaultCollector == "" {
+		defaultCollector = "otel-collector:4317"
+	}
+	install(defaultSample, defaultCollector)
+
+	// Dynamically react to changes in the config-tracing ConfigMap.
 	tracerUpdater := configmap.TypeFilter(&tracingconfig.Config{})(func(name string, value interface{}) {
 		cfg := value.(*tracingconfig.Config)
-		if err := oct.ApplyConfig(cfg); err != nil {
-			logger.Errorw("Unable to apply open census tracer config", zap.Error(err))
-			return
+
+		if cfg.Backend == tracingconfig.Zipkin && cfg.ZipkinEndpoint != "" {
+			install(cfg.SampleRate, cfg.ZipkinEndpoint)
+		} else {
+			// Disable tracing if backend is none or endpoint missing.
+			install(0, "")
 		}
 	})
 
