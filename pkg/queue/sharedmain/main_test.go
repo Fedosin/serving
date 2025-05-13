@@ -27,16 +27,16 @@ import (
 	"testing"
 	"time"
 
-	"go.opencensus.io/plugin/ochttp"
-
 	"github.com/kelseyhightower/envconfig"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	ocbridge "go.opentelemetry.io/otel/bridge/opencensus"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	netheader "knative.dev/networking/pkg/http/header"
 	netstats "knative.dev/networking/pkg/http/stats"
 	pkgnet "knative.dev/pkg/network"
-	"knative.dev/pkg/tracing"
-	tracingconfig "knative.dev/pkg/tracing/config"
-	"knative.dev/pkg/tracing/propagation/tracecontextb3"
-	tracetesting "knative.dev/pkg/tracing/testing"
 	"knative.dev/serving/pkg/queue"
 	"knative.dev/serving/pkg/queue/health"
 )
@@ -112,22 +112,23 @@ func TestQueueTraceSpans(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create tracer with reporter recorder
-			reporter, co := tracetesting.FakeZipkinExporter()
-			defer reporter.Close()
-			oct := tracing.NewOpenCensusTracer(co)
-			defer oct.Shutdown(context.Background())
+			// Setup OpenTelemetry tracer provider with in-memory recorder.
+			spanRecorder := tracetest.NewSpanRecorder()
 
-			cfg := tracingconfig.Config{
-				Backend: tracingconfig.Zipkin,
-				Debug:   true,
-			}
+			sampler := sdktrace.AlwaysSample()
 			if !tc.enableTrace {
-				cfg.Backend = tracingconfig.None
+				sampler = sdktrace.NeverSample()
 			}
-			if err := oct.ApplyConfig(&cfg); err != nil {
-				t.Error("Failed to apply tracer config:", err)
-			}
+
+			tp := sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(spanRecorder),
+				sdktrace.WithSampler(sampler),
+			)
+			otel.SetTracerProvider(tp)
+			defer tp.Shutdown(context.Background())
+
+			// Install OpenCensus bridge so existing OC instrumentation is captured.
+			ocbridge.InstallTraceBridge()
 
 			writer := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "http://example.com", nil)
@@ -145,10 +146,9 @@ func TestQueueTraceSpans(t *testing.T) {
 				if !tc.infiniteCC {
 					breaker = queue.NewBreaker(params)
 				}
-				proxy.Transport = &ochttp.Transport{
-					Base:        pkgnet.AutoTransport,
-					Propagation: tracecontextb3.TraceContextB3Egress,
-				}
+				proxy.Transport = otelhttp.NewTransport(pkgnet.AutoTransport, otelhttp.WithSpanNameFormatter(
+					func(operation string, r *http.Request) string { return "/" },
+				))
 
 				h := queue.ProxyHandler(breaker, netstats.NewRequestStats(time.Now()), true /*tracingEnabled*/, proxy)
 				h(writer, req)
@@ -158,7 +158,8 @@ func TestQueueTraceSpans(t *testing.T) {
 				h(writer, req)
 			}
 
-			gotSpans := reporter.Flush()
+			gotSpans := spanRecorder.Ended()
+
 			if len(gotSpans) != tc.wantSpans {
 				t.Errorf("Got %d spans, expected %d", len(gotSpans), tc.wantSpans)
 			}
@@ -172,20 +173,26 @@ func TestQueueTraceSpans(t *testing.T) {
 				spanNames = append([]string{"queue_wait"}, spanNames...)
 			}
 			gs := []string{}
-			for i := range gotSpans {
-				gs = append(gs, gotSpans[i].Name)
+			for _, sp := range gotSpans {
+				gs = append(gs, sp.Name())
 			}
 			t.Log(spanNames)
 			t.Log(gs)
 			for i, spanName := range spanNames[:tc.wantSpans] {
-				if gotSpans[i].Name != spanName {
-					t.Errorf("Span[%d].Name = %q, want: %q", i, gotSpans[i].Name, spanName)
+				if gotSpans[i].Name() != spanName {
+					t.Errorf("Span[%d].Name = %q, want: %q", i, gotSpans[i].Name(), spanName)
 				}
 				if tc.probeWillFail {
-					if len(gotSpans[i].Annotations) == 0 {
-						t.Error("Expected error as value for failed span Annotation, got empty Annotation")
-					} else if gotSpans[i].Annotations[0].Value != "error" {
-						t.Errorf("Expected error as value for failed span Annotation, got %q", gotSpans[i].Annotations[0].Value)
+					events := gotSpans[i].Events()
+					found := false
+					for _, ev := range events {
+						if ev.Name == "error" {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Error("Expected error event on failed span, got none")
 					}
 				}
 			}

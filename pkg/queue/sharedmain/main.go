@@ -27,13 +27,15 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
-	"go.opencensus.io/plugin/ochttp"
 	"go.uber.org/automaxprocs/maxprocs"
 	"go.uber.org/zap"
-	"knative.dev/serving/pkg/queue/certificate"
 
+	// OpenTelemetry
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	ocbridge "go.opentelemetry.io/otel/bridge/opencensus"
+
+	// Kubernetes / Knative deps
 	"k8s.io/apimachinery/pkg/types"
-
 	"knative.dev/networking/pkg/certificates"
 	netstats "knative.dev/networking/pkg/http/stats"
 	pkglogging "knative.dev/pkg/logging"
@@ -42,14 +44,15 @@ import (
 	pkgnet "knative.dev/pkg/network"
 	"knative.dev/pkg/profiling"
 	"knative.dev/pkg/signals"
-	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
-	"knative.dev/pkg/tracing/propagation/tracecontextb3"
+
 	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/networking"
 	"knative.dev/serving/pkg/queue"
+	"knative.dev/serving/pkg/queue/certificate"
 	"knative.dev/serving/pkg/queue/readiness"
+	"knative.dev/serving/pkg/telemetry"
 )
 
 const (
@@ -193,16 +196,43 @@ func Main(opts ...Option) error {
 	d.Logger = logger
 	d.Transport = buildTransport(env)
 
-	if env.TracingConfigBackend != tracingconfig.None {
-		oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(env.ServingPod, env.ServingPodIP, logger))
-		oct.ApplyConfig(&tracingconfig.Config{
-			Backend:        env.TracingConfigBackend,
-			Debug:          env.TracingConfigDebug,
-			ZipkinEndpoint: env.TracingConfigZipkinEndpoint,
-			SampleRate:     env.TracingConfigSampleRate,
-		})
-		defer oct.Shutdown(context.Background())
+	// -------------------- Tracing Setup (OpenTelemetry) --------------------
+	var shutdownTracing func(ctx context.Context) error
+
+	// Helper to install or disable tracing based on the env configuration.
+	installTracing := func(sample float64, collector string) {
+		// Shutdown previous provider if any.
+		if shutdownTracing != nil {
+			_ = shutdownTracing(context.Background())
+			shutdownTracing = nil
+		}
+
+		// Empty collector or sample <= 0 disables tracing.
+		if collector == "" || sample <= 0 {
+			return
+		}
+
+		sd, err := telemetry.InstallTracing(d.Ctx, "queue-proxy", env.ServingPod, env.ServingPodIP, sample, collector)
+		if err != nil {
+			logger.Errorw("Unable to initialize OpenTelemetry tracing", zap.Error(err))
+			return
+		}
+		shutdownTracing = sd
+
+		// Install bridge so existing OpenCensus instrumentation is exported via OpenTelemetry.
+		ocbridge.InstallTraceBridge()
 	}
+
+	// Initial tracing installation based on env vars.
+	if env.TracingConfigBackend == tracingconfig.Zipkin && env.TracingConfigZipkinEndpoint != "" {
+		installTracing(env.TracingConfigSampleRate, env.TracingConfigZipkinEndpoint)
+	}
+	// Ensure tracer shutdown on exit.
+	defer func() {
+		if shutdownTracing != nil {
+			_ = shutdownTracing(context.Background())
+		}
+	}()
 
 	// allow extensions to read d and return modified context and transport
 	for _, opts := range opts {
@@ -355,10 +385,7 @@ func buildTransport(env config) http.RoundTripper {
 		return transport
 	}
 
-	return &ochttp.Transport{
-		Base:        transport,
-		Propagation: tracecontextb3.TraceContextB3Egress,
-	}
+	return otelhttp.NewTransport(transport)
 }
 
 func buildBreaker(logger *zap.SugaredLogger, env config) *queue.Breaker {
