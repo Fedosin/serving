@@ -67,6 +67,9 @@ import (
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/networking"
 	"knative.dev/serving/pkg/telemetry"
+
+	// OpenTelemetry bridge to capture existing OpenCensus spans
+	ocbridge "go.opentelemetry.io/otel/bridge/opencensus"
 )
 
 const (
@@ -201,6 +204,10 @@ func main() {
 			return
 		}
 		shutdownTracing = sd
+
+		// Install bridge so existing OpenCensus instrumentation (used in portions of
+		// the Activator codebase) is exported via the new OpenTelemetry pipeline.
+		ocbridge.InstallTraceBridge()
 	}
 
 	// Initial installation with defaults/env vars.
