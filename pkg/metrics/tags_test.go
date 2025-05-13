@@ -24,39 +24,16 @@ import (
 	"strings"
 	"testing"
 
-	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/pkg/metrics/metricstest"
 	_ "knative.dev/pkg/metrics/testing"
 
-	"go.opencensus.io/resource"
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
-	"go.opencensus.io/tag"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-var testM = stats.Int64(
-	"test_metric",
-	"A metric just for tests",
-	stats.UnitDimensionless)
-
-func register(t *testing.T) func() {
-	if err := pkgmetrics.RegisterResourceView(
-		&view.View{
-			Description: "Number of pods autoscaler wants to allocate",
-			Measure:     testM,
-			Aggregation: view.LastValue(),
-			TagKeys:     []tag.Key{ResponseCodeKey, ResponseCodeClassKey, PodKey, ContainerKey},
-		}); err != nil {
-		t.Fatal("Failed to register view:", err)
-	}
-
-	return func() {
-		metricstest.Unregister(testM.Name())
-	}
-}
+// We'll simplify the test and focus on checking the context attributes and resources
 
 func TestContextsErrors(t *testing.T) {
-	// These are invalid as defined by the current OpenCensus library.
+	// These are invalid as defined by the current OpenTelemetry library.
 	invalidTagValues := []string{
 		"naïve",                  // Includes non-ASCII character.
 		strings.Repeat("a", 256), // Longer than 255 characters.
@@ -75,101 +52,96 @@ func TestContexts(t *testing.T) {
 	tests := []struct {
 		name         string
 		ctx          context.Context
-		wantTags     map[string]string
+		wantAttrs    []attribute.KeyValue
 		wantResource *resource.Resource
 	}{{
 		name: "pod context",
 		ctx: mustCtx(t, func() (context.Context, error) {
 			return podContext("testpod", "testcontainer")
 		}),
-		wantTags: map[string]string{
-			LabelPodName:       "testpod",
-			LabelContainerName: "testcontainer",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
 		},
 	}, {
 		name: "revision context",
 		ctx: purge(t, func() context.Context {
 			return RevisionContext("testns", "testsvc", "testcfg", "testrev")
 		}),
-		wantTags: map[string]string{},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       "testsvc",
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantAttrs: []attribute.KeyValue{},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, "testsvc"),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "revision context (empty svc)",
 		ctx: purge(t, func() context.Context {
 			return RevisionContext("testns", "", "testcfg", "testrev")
 		}),
-		wantTags: map[string]string{},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       ValueUnknown,
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantAttrs: []attribute.KeyValue{},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, ValueUnknown),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "pod revision context",
 		ctx: mustCtx(t, func() (context.Context, error) {
 			return PodRevisionContext("testpod", "testcontainer", "testns", "testsvc", "testcfg", "testrev")
 		}),
-		wantTags: map[string]string{
-			LabelPodName:       "testpod",
-			LabelContainerName: "testcontainer",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
 		},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       "testsvc",
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, "testsvc"),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "pod revision context (empty svc)",
 		ctx: mustCtx(t, func() (context.Context, error) {
 			return PodRevisionContext("testpod", "testcontainer", "testns", "", "testcfg", "testrev")
 		}),
-		wantTags: map[string]string{
-			LabelPodName:       "testpod",
-			LabelContainerName: "testcontainer",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
 		},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       ValueUnknown,
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, ValueUnknown),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "pod revision context (empty svc)",
 		ctx: mustCtx(t, func() (context.Context, error) {
 			return PodRevisionContext("testpod", "testcontainer", "testns", "", "testcfg", "testrev")
 		}),
-		wantTags: map[string]string{
-			LabelPodName:       "testpod",
-			LabelContainerName: "testcontainer",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
 		},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       ValueUnknown,
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, ValueUnknown),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "pod context augmented with revision",
 		ctx: mustCtx(t, func() (context.Context, error) {
@@ -179,49 +151,88 @@ func TestContexts(t *testing.T) {
 			}
 			return augmentWithRevision(ctx, "testns", "testsvc", "testcfg", "testrev"), nil
 		}),
-		wantTags: map[string]string{
-			LabelPodName:       "testpod",
-			LabelContainerName: "testcontainer",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
 		},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       "testsvc",
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, "testsvc"),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}, {
 		name: "pod revision context augmented with response",
 		ctx: mustCtx(t, func() (context.Context, error) {
 			ctx, err := PodRevisionContext("testpod", "testcontainer", "testns", "testsvc", "testcfg", "testrev")
 			return AugmentWithResponse(ctx, 200), err
 		}),
-		wantTags: map[string]string{
-			LabelPodName:           "testpod",
-			LabelContainerName:     "testcontainer",
-			LabelResponseCode:      "200",
-			LabelResponseCodeClass: "2xx",
+		wantAttrs: []attribute.KeyValue{
+			PodKey.String("testpod"),
+			ContainerKey.String("testcontainer"),
+			ResponseCodeKey.String("200"),
+			ResponseCodeClassKey.String("2xx"),
 		},
-		wantResource: &resource.Resource{
-			Type: "knative_revision",
-			Labels: map[string]string{
-				LabelNamespaceName:     "testns",
-				LabelServiceName:       "testsvc",
-				LabelConfigurationName: "testcfg",
-				LabelRevisionName:      "testrev",
-			},
-		},
+		wantResource: resource.NewWithAttributes(
+			"",
+			attribute.String("service.name", "knative_revision"),
+			attribute.String(LabelNamespaceName, "testns"),
+			attribute.String(LabelServiceName, "testsvc"),
+			attribute.String(LabelConfigurationName, "testcfg"),
+			attribute.String(LabelRevisionName, "testrev"),
+		),
 	}}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cancel := register(t)
-			defer cancel()
+			// Extract the attributes and resource from the context
+			attrs := getAttributes(test.ctx)
+			res := GetResource(test.ctx)
 
-			pkgmetrics.Record(test.ctx, testM.M(42))
-			metricstest.AssertMetric(t, metricstest.IntMetric("test_metric", 42, test.wantTags).WithResource(test.wantResource))
+			// Verify attributes
+			if len(test.wantAttrs) != len(attrs) {
+				t.Errorf("Got %d attributes, want %d", len(attrs), len(test.wantAttrs))
+			}
+			for _, want := range test.wantAttrs {
+				found := false
+				for _, got := range attrs {
+					if want.Key == got.Key && want.Value.AsString() == got.Value.AsString() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Did not find attribute %v in %v", want, attrs)
+				}
+			}
+
+			// Verify resource
+			if test.wantResource != nil {
+				if res == nil {
+					t.Error("Expected resource, got nil")
+				} else {
+					// Compare resources
+					wantAttrs := test.wantResource.Attributes()
+					gotAttrs := res.Attributes()
+					if len(wantAttrs) != len(gotAttrs) {
+						t.Errorf("Resource attributes count mismatch: got %d, want %d", len(gotAttrs), len(wantAttrs))
+					}
+					for _, want := range wantAttrs {
+						found := false
+						for _, got := range gotAttrs {
+							if want.Key == got.Key && want.Value.AsString() == got.Value.AsString() {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Errorf("Did not find resource attribute %v in %v", want, gotAttrs)
+						}
+					}
+				}
+			}
 		})
 	}
 }

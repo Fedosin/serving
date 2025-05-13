@@ -17,7 +17,7 @@ limitations under the License.
 package metrics
 
 import (
-	"go.opencensus.io/tag"
+	"go.opentelemetry.io/otel/attribute"
 	"knative.dev/pkg/metrics/metricskey"
 )
 
@@ -66,15 +66,13 @@ const (
 	ValueUnknown = metricskey.ValueUnknown
 )
 
-// Create the tag keys that will be used to add tags to our measurements.
-// Tag keys must conform to the restrictions described in
-// go.opencensus.io/tag/validate.go. Currently those restrictions are:
-// - length between 1 and 255 inclusive
-// - characters are printable US-ASCII
+// Create the attribute keys that will be used to add attributes to our measurements.
+// Attribute keys must conform to the restrictions described in
+// go.opentelemetry.io/otel/attribute documentation.
 var (
-	PodKey               = tag.MustNewKey(LabelPodName)
-	ContainerKey         = tag.MustNewKey(LabelContainerName)
-	ResponseCodeKey      = tag.MustNewKey(LabelResponseCode)
-	ResponseCodeClassKey = tag.MustNewKey(LabelResponseCodeClass)
-	RouteTagKey          = tag.MustNewKey(LabelRouteTag)
+	PodKey               = attribute.Key(LabelPodName)
+	ContainerKey         = attribute.Key(LabelContainerName)
+	ResponseCodeKey      = attribute.Key(LabelResponseCode)
+	ResponseCodeClassKey = attribute.Key(LabelResponseCodeClass)
+	RouteTagKey          = attribute.Key(LabelRouteTag)
 )

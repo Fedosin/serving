@@ -24,8 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/metrics/metricskey"
 
-	"go.opencensus.io/resource"
-	"go.opencensus.io/tag"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 // contextCache stores the metrics recorder contexts in an LRU cache.
@@ -77,10 +77,11 @@ func podContext(pod, container string) (context.Context, error) {
 		return ctx.(context.Context), nil
 	}
 
-	ctx, err := tag.New(context.Background(), tag.Upsert(PodKey, pod), tag.Upsert(ContainerKey, container))
-	if err != nil {
-		return ctx, err
+	attrs := []attribute.KeyValue{
+		PodKey.String(pod),
+		ContainerKey.String(container),
 	}
+	ctx := context.WithValue(context.Background(), attributesKey{}, attrs)
 
 	contextCache.Add(key, ctx)
 	return ctx, nil
@@ -113,37 +114,60 @@ func PodRevisionContext(pod, container, ns, svc, cfg, rev string) (context.Conte
 	return ctx, nil
 }
 
+// attributesKey is the context key for storing attributes
+type attributesKey struct{}
+
+// resourceKey is the context key for storing resource
+type resourceKey struct{}
+
 // augmentWithRevision augments the given context with a knative_revision resource.
 func augmentWithRevision(baseCtx context.Context, ns, svc, cfg, rev string) context.Context {
-	r := resource.Resource{
-		Type: ResourceTypeKnativeRevision,
-		Labels: map[string]string{
-			LabelNamespaceName:     ns,
-			LabelServiceName:       valueOrUnknown(svc),
-			LabelConfigurationName: cfg,
-			LabelRevisionName:      rev,
-		},
-	}
-	return metricskey.WithResource(baseCtx, r)
+	r := resource.NewWithAttributes(
+		"", // No schema URL needed
+		attribute.String("service.name", ResourceTypeKnativeRevision),
+		attribute.String(LabelNamespaceName, ns),
+		attribute.String(LabelServiceName, valueOrUnknown(svc)),
+		attribute.String(LabelConfigurationName, cfg),
+		attribute.String(LabelRevisionName, rev),
+	)
+	return context.WithValue(baseCtx, resourceKey{}, r)
 }
 
 // AugmentWithResponse augments the given context with response-code specific tags.
 func AugmentWithResponse(baseCtx context.Context, responseCode int) context.Context {
-	ctx, _ := tag.New(
-		baseCtx,
-		tag.Upsert(ResponseCodeKey, strconv.Itoa(responseCode)),
-		tag.Upsert(ResponseCodeClassKey, responseCodeClass(responseCode)))
-	return ctx
+	attrs := getAttributes(baseCtx)
+	attrs = append(attrs,
+		ResponseCodeKey.String(strconv.Itoa(responseCode)),
+		ResponseCodeClassKey.String(responseCodeClass(responseCode)),
+	)
+	return context.WithValue(baseCtx, attributesKey{}, attrs)
 }
 
 // AugmentWithResponseAndRouteTag augments the given context with response-code and route-tag specific tags.
 func AugmentWithResponseAndRouteTag(baseCtx context.Context, responseCode int, routeTag string) context.Context {
-	ctx, _ := tag.New(
-		baseCtx,
-		tag.Upsert(ResponseCodeKey, strconv.Itoa(responseCode)),
-		tag.Upsert(ResponseCodeClassKey, responseCodeClass(responseCode)),
-		tag.Upsert(RouteTagKey, routeTag))
-	return ctx
+	attrs := getAttributes(baseCtx)
+	attrs = append(attrs,
+		ResponseCodeKey.String(strconv.Itoa(responseCode)),
+		ResponseCodeClassKey.String(responseCodeClass(responseCode)),
+		RouteTagKey.String(routeTag),
+	)
+	return context.WithValue(baseCtx, attributesKey{}, attrs)
+}
+
+// getAttributes retrieves the attributes from the context
+func getAttributes(ctx context.Context) []attribute.KeyValue {
+	if attrs, ok := ctx.Value(attributesKey{}).([]attribute.KeyValue); ok {
+		return attrs
+	}
+	return []attribute.KeyValue{}
+}
+
+// GetResource retrieves the resource from the context
+func GetResource(ctx context.Context) *resource.Resource {
+	if res, ok := ctx.Value(resourceKey{}).(*resource.Resource); ok {
+		return res
+	}
+	return nil
 }
 
 // responseCodeClass converts response code to a string of response code class.
