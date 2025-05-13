@@ -22,7 +22,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	// TODO: Upgrade tests to use OpenTelemetry resource when metricstest package supports it
 	"go.opencensus.io/resource"
+
 	netheader "knative.dev/networking/pkg/http/header"
 	"knative.dev/pkg/metrics/metricstest"
 	"knative.dev/serving/pkg/metrics"
@@ -139,9 +141,9 @@ func TestRequestMetricsHandlerWithEnablingTagOnRequestMetrics(t *testing.T) {
 
 func reset() {
 	metricstest.Unregister(
-		requestCountM.Name(), appRequestCountM.Name(),
-		responseTimeInMsecM.Name(), appResponseTimeInMsecM.Name(),
-		queueDepthM.Name())
+		"request_count", "app_request_count",
+		"request_latencies", "app_request_latencies",
+		"queue_depth")
 }
 
 func TestRequestMetricsHandlerPanickingHandler(t *testing.T) {

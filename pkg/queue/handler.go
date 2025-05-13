@@ -22,7 +22,9 @@ import (
 	"net/http"
 	"time"
 
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+
 	netheader "knative.dev/networking/pkg/http/header"
 	netstats "knative.dev/networking/pkg/http/stats"
 	"knative.dev/serving/pkg/activator"
@@ -38,8 +40,9 @@ func ProxyHandler(breaker *Breaker, stats *netstats.RequestStats, tracingEnabled
 		}
 
 		if tracingEnabled {
-			proxyCtx, proxySpan := trace.StartSpan(r.Context(), "queue_proxy")
-			r = r.WithContext(proxyCtx)
+			tracer := otel.GetTracerProvider().Tracer("knative.dev/serving/pkg/queue")
+			ctx, proxySpan := tracer.Start(r.Context(), "queue_proxy")
+			r = r.WithContext(ctx)
 			defer proxySpan.End()
 		}
 
@@ -56,9 +59,10 @@ func ProxyHandler(breaker *Breaker, stats *netstats.RequestStats, tracingEnabled
 
 		// Enforce queuing and concurrency limits.
 		if breaker != nil {
-			var waitSpan *trace.Span
+			var waitSpan trace.Span
 			if tracingEnabled {
-				_, waitSpan = trace.StartSpan(r.Context(), "queue_wait")
+				tracer := otel.GetTracerProvider().Tracer("knative.dev/serving/pkg/queue")
+				_, waitSpan = tracer.Start(r.Context(), "queue_wait")
 			}
 			if err := breaker.Maybe(r.Context(), func() {
 				waitSpan.End()

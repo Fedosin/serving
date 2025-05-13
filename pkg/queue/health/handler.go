@@ -20,7 +20,10 @@ import (
 	"io"
 	"net/http"
 
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	netheader "knative.dev/networking/pkg/http/header"
 	"knative.dev/serving/pkg/queue"
@@ -34,32 +37,36 @@ func ProbeHandler(prober func() bool, tracingEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ph := netheader.GetKnativeProbeValue(r)
 
-		var probeSpan *trace.Span
+		var probeSpan trace.Span
 		if tracingEnabled {
-			_, probeSpan = trace.StartSpan(r.Context(), "probe")
+			tracer := otel.GetTracerProvider().Tracer("knative.dev/serving/pkg/queue/health")
+			_, probeSpan = tracer.Start(r.Context(), "probe")
 			defer probeSpan.End()
 		}
 
 		if ph != queue.Name {
 			http.Error(w, badProbeTemplate+ph, http.StatusBadRequest)
-			probeSpan.Annotate([]trace.Attribute{
-				trace.StringAttribute("queueproxy.probe.error", badProbeTemplate+ph),
-			}, "error")
+			if probeSpan != nil {
+				probeSpan.SetStatus(codes.Error, badProbeTemplate+ph)
+				probeSpan.SetAttributes(attribute.String("queueproxy.probe.error", badProbeTemplate+ph))
+			}
 			return
 		}
 
 		if prober == nil {
 			http.Error(w, "no probe", http.StatusInternalServerError)
-			probeSpan.Annotate([]trace.Attribute{
-				trace.StringAttribute("queueproxy.probe.error", "no probe"),
-			}, "error")
+			if probeSpan != nil {
+				probeSpan.SetStatus(codes.Error, "no probe")
+				probeSpan.SetAttributes(attribute.String("queueproxy.probe.error", "no probe"))
+			}
 			return
 		}
 
 		if !prober() {
-			probeSpan.Annotate([]trace.Attribute{
-				trace.StringAttribute("queueproxy.probe.error", "container not ready"),
-			}, "error")
+			if probeSpan != nil {
+				probeSpan.SetStatus(codes.Error, "container not ready")
+				probeSpan.SetAttributes(attribute.String("queueproxy.probe.error", "container not ready"))
+			}
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
