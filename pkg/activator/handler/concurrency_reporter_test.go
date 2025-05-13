@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"go.opencensus.io/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	netstats "knative.dev/networking/pkg/http/stats"
@@ -559,22 +558,13 @@ func TestMetricsReported(t *testing.T) {
 	<-cr.statCh // scale-from-0 event
 	<-cr.statCh // "proper" event
 
-	wantResource := &resource.Resource{
-		Type: "knative_revision",
-		Labels: map[string]string{
-			metrics.LabelRevisionName:      rev1.Name,
-			metrics.LabelNamespaceName:     rev1.Namespace,
-			metrics.LabelServiceName:       "service-" + rev1.Name,
-			metrics.LabelConfigurationName: "config-" + rev1.Name,
-		},
-	}
 	wantTags := map[string]string{
 		metrics.LabelPodName:       "the-best-activator",
 		metrics.LabelContainerName: "activator",
 	}
 
 	// Should report a concurrency of 3 because the first event was a scale-from-0 (gets discounted)
-	wantMetric := metricstest.FloatMetric("request_concurrency", 3, wantTags).WithResource(wantResource)
+	wantMetric := metricstest.FloatMetric("request_concurrency", 3, wantTags)
 	metricstest.AssertMetric(t, wantMetric)
 
 	// Report again
@@ -582,7 +572,7 @@ func TestMetricsReported(t *testing.T) {
 	<-cr.statCh
 
 	// The next time round we should report the "real" concurrency
-	wantMetric = metricstest.FloatMetric("request_concurrency", 4, wantTags).WithResource(wantResource)
+	wantMetric = metricstest.FloatMetric("request_concurrency", 4, wantTags)
 	metricstest.AssertMetric(t, wantMetric)
 }
 

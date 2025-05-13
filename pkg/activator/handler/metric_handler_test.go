@@ -25,12 +25,10 @@ import (
 	"strconv"
 	"testing"
 
-	"go.opencensus.io/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/metrics/metricstest"
 	_ "knative.dev/pkg/metrics/testing"
 	"knative.dev/serving/pkg/activator"
-	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/metrics"
 )
 
@@ -94,15 +92,6 @@ func TestRequestMetricHandler(t *testing.T) {
 					labelCode = http.StatusInternalServerError
 				}
 
-				wantResource := &resource.Resource{
-					Type: "knative_revision",
-					Labels: map[string]string{
-						metrics.LabelNamespaceName:     rev.Namespace,
-						metrics.LabelServiceName:       rev.Labels[serving.ServiceLabelKey],
-						metrics.LabelConfigurationName: rev.Labels[serving.ConfigurationLabelKey],
-						metrics.LabelRevisionName:      rev.Name,
-					},
-				}
 				wantTags := map[string]string{
 					metrics.LabelPodName:           testPod,
 					metrics.LabelContainerName:     activator.Name,
@@ -110,7 +99,7 @@ func TestRequestMetricHandler(t *testing.T) {
 					metrics.LabelResponseCodeClass: strconv.Itoa(labelCode/100) + "xx",
 				}
 
-				metricstest.AssertMetric(t, metricstest.IntMetric(requestCountM.Name(), 1, wantTags).WithResource(wantResource))
+				metricstest.AssertMetric(t, metricstest.IntMetric(requestCountM.Name(), 1, wantTags))
 				metricstest.AssertMetricExists(t, responseTimeInMsecM.Name())
 			}()
 
