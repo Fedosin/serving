@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	lru "github.com/hashicorp/golang-lru"
@@ -72,6 +73,13 @@ type podCtx struct {
 // podContext generates a new base metric reporting context containing
 // the respective pod specific tags.
 func podContext(pod, container string) (context.Context, error) {
+	if !PodKey.String(pod).Valid() {
+		return nil, fmt.Errorf("invalid pod name: %s", pod)
+	}
+	if !ContainerKey.String(container).Valid() {
+		return nil, fmt.Errorf("invalid container name: %s", container)
+	}
+
 	key := podCtx{pod: pod, container: container}
 	if ctx, ok := contextCache.Get(key); ok {
 		return ctx.(context.Context), nil

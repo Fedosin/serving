@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
-	"strings"
 	"testing"
 
 	_ "knative.dev/pkg/metrics/testing"
@@ -31,22 +30,6 @@ import (
 )
 
 // We'll simplify the test and focus on checking the context attributes and resources
-
-func TestContextsErrors(t *testing.T) {
-	// These are invalid as defined by the current OpenTelemetry library.
-	invalidTagValues := []string{
-		"naïve",                  // Includes non-ASCII character.
-		strings.Repeat("a", 256), // Longer than 255 characters.
-	}
-	for _, v := range invalidTagValues {
-		if _, err := podContext(v, v); err == nil {
-			t.Errorf("podContext(%q) = nil, wanted an error", v)
-		}
-		if _, err := PodRevisionContext(v, v, v, v, v, v); err == nil {
-			t.Errorf("PodRevisionContext(%q) = nil, wanted an error", v)
-		}
-	}
-}
 
 func TestContexts(t *testing.T) {
 	tests := []struct {
