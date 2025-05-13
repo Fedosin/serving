@@ -27,13 +27,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
 	netcfg "knative.dev/networking/pkg/config"
-	pkgmetrics "knative.dev/pkg/metrics"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/metrics"
@@ -71,20 +70,22 @@ var (
 	errDirectScrapingNotAvailable = errors.New("all pod scrapes returned 503 error")
 	errPodsExhausted              = errors.New("pods exhausted")
 
-	scrapeTimeM = stats.Float64(
-		"scrape_time",
-		"Time to scrape metrics in milliseconds",
-		stats.UnitMilliseconds)
+	// meter is the OpenTelemetry meter used for creating metric instruments
+	meter = otel.GetMeterProvider().Meter("knative.dev/serving/pkg/autoscaler/metrics")
+
+	// scrapeTimeM is a histogram recording time to scrape metrics in milliseconds
+	scrapeTimeM metric.Float64Histogram
 )
 
 func init() {
-	if err := pkgmetrics.RegisterResourceView(
-		&view.View{
-			Description: "The time to scrape metrics in milliseconds",
-			Measure:     scrapeTimeM,
-			Aggregation: view.Distribution(pkgmetrics.Buckets125(1, 100000)...),
-		},
-	); err != nil {
+	var err error
+	// Create a histogram with the same bucket boundaries that were previously used with OpenCensus
+	scrapeTimeM, err = meter.Float64Histogram(
+		"scrape_time",
+		metric.WithDescription("Time to scrape metrics in milliseconds"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
 		panic(err)
 	}
 }
@@ -212,7 +213,8 @@ func (s *serviceScraper) Scrape(window time.Duration) (stat Stat, err error) {
 			return
 		}
 		scrapeTime := time.Since(startTime)
-		pkgmetrics.RecordBatch(s.statsCtx, scrapeTimeM.M(float64(scrapeTime.Milliseconds())))
+		// Record the metric using OpenTelemetry
+		scrapeTimeM.Record(s.statsCtx, float64(scrapeTime.Milliseconds()))
 	}()
 
 	switch s.meshMode {
